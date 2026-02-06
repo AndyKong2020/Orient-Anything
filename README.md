@@ -19,6 +19,8 @@
 ![teaser](assets/demo.png)
 
 ## News
+* **2025-12-12:** 🔥[Paper](https://openreview.net/pdf?id=n3armuTFit), [Project Page](https://orient-anythingv2.github.io), [Code](https://github.com/SpatialVision/Orient-Anything-V2), [Training Data](https://huggingface.co/datasets/Viglong/OriAnyV2_Train_Render), [Model Checkpoint](https://huggingface.co/Viglong/OriAnyV2_ckpt/blob/main/demo_ckpts/rotmod_realrotaug_best.pt), and [Demo](https://huggingface.co/spaces/Viglong/Orient-Anything-V2) of Orient Anything V2 have been released!
+* **2025-09-18:** 🔥Orient Anything V2 has been accepted as a Spotlight @ NeurIPS 2025!
 * **2025-05-01:** Orient Anything is accepted by ICML 2025!
 * **2024-12-24:** [Paper](https://arxiv.org/abs/2412.18605), [Project Page](https://orient-anything.github.io), [Code](https://github.com/SpatialVision/Orient-Anything), Models, and [Demo](https://huggingface.co/spaces/Viglong/Orient-Anything) are released.
 
