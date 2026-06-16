@@ -1,4 +1,5 @@
 import gradio as gr
+import os
 from paths import *
 
 from vision_tower import DINOv2_MLP
@@ -8,11 +9,23 @@ from inference import *
 from utils import *
 
 from huggingface_hub import hf_hub_download
-ckpt_path = hf_hub_download(repo_id="Viglong/Orient-Anything", filename="ronormsigma1/dino_weight.pt", repo_type="model", cache_dir='./', resume_download=True)
+try:
+    import torch_npu  # noqa: F401
+except ImportError:
+    pass
+
+cache_dir = os.environ.get("ORIENT_CACHE_DIR") or os.environ.get("HF_HOME") or "./"
+ckpt_path = hf_hub_download(repo_id="Viglong/Orient-Anything", filename="ronormsigma1/dino_weight.pt", repo_type="model", cache_dir=cache_dir, resume_download=True)
 print(ckpt_path)
 
 save_path = './'
-device = 'cpu'
+if hasattr(torch, "npu") and torch.npu.is_available():
+    device = 'npu:0'
+elif torch.cuda.is_available():
+    device = 'cuda'
+else:
+    device = 'cpu'
+print(f'using device: {device}')
 dino = DINOv2_MLP(
                     dino_mode   = 'large',
                     in_dim      = 1024,
@@ -27,7 +40,7 @@ print('model create')
 dino.load_state_dict(torch.load(ckpt_path, map_location='cpu'))
 dino = dino.to(device)
 print('weight loaded')
-val_preprocess   = AutoImageProcessor.from_pretrained(DINO_LARGE, cache_dir='./')
+val_preprocess   = AutoImageProcessor.from_pretrained(DINO_LARGE, cache_dir=cache_dir)
 
 def infer_func(img, do_rm_bkg, do_infer_aug):
     origin_img = Image.fromarray(img)
@@ -38,9 +51,9 @@ def infer_func(img, do_rm_bkg, do_infer_aug):
         rm_bkg_img = background_preprocess(origin_img, do_rm_bkg)
         angles = get_3angle(rm_bkg_img, dino, val_preprocess, device)
     
-    phi   = np.radians(angles[0])
-    theta = np.radians(angles[1])
-    gamma = angles[2]
+    phi   = np.radians(float(angles[0]))
+    theta = np.radians(float(angles[1]))
+    gamma = float(angles[2])
     confidence = float(angles[3])
     if confidence > 0.5:
         render_axis = render_3D_axis(phi, theta, gamma)
@@ -69,4 +82,7 @@ server = gr.Interface(
     ]
 )
 
-server.launch()
+server.launch(
+    server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
+    server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
+)

@@ -11,6 +11,9 @@ from transformers.models.dinov2.modeling_dinov2 import Dinov2Embeddings
 from transformers.models.dinov2.configuration_dinov2 import Dinov2Config
 import numpy as np
 from contextlib import nullcontext
+import os
+
+MODEL_CACHE_DIR = os.environ.get("ORIENT_CACHE_DIR") or os.environ.get("HF_HOME") or "./"
 
 def get_activation(activation):
     if activation.lower() == 'gelu':
@@ -102,13 +105,13 @@ class DINOv2_MLP(nn.Module):
         super().__init__()
         # self.dinov2 = AutoModel.from_pretrained(DINO_BASE)
         if dino_mode == 'base':
-            self.dinov2 = FLIP_DINOv2.from_pretrained(DINO_BASE, cache_dir='./')
+            self.dinov2 = FLIP_DINOv2.from_pretrained(DINO_BASE, cache_dir=MODEL_CACHE_DIR)
         elif dino_mode == 'large':
-            self.dinov2 = FLIP_DINOv2.from_pretrained(DINO_LARGE, cache_dir='./')
+            self.dinov2 = FLIP_DINOv2.from_pretrained(DINO_LARGE, cache_dir=MODEL_CACHE_DIR)
         elif dino_mode == 'small':
-            self.dinov2 = FLIP_DINOv2.from_pretrained(DINO_SMALL, cache_dir='./')
+            self.dinov2 = FLIP_DINOv2.from_pretrained(DINO_SMALL, cache_dir=MODEL_CACHE_DIR)
         elif dino_mode == 'giant':
-            self.dinov2 = FLIP_DINOv2.from_pretrained(DINO_GIANT, cache_dir='./')
+            self.dinov2 = FLIP_DINOv2.from_pretrained(DINO_GIANT, cache_dir=MODEL_CACHE_DIR)
         
         self.down_sampler = MLP_dim(in_dim=in_dim, out_dim=out_dim)
         self.random_mask  = False
@@ -158,4 +161,3 @@ class DINOv2_MLP(nn.Module):
             init.xavier_uniform_(m.weight)
             if m.bias is not None:
                 init.constant_(m.bias, 0)
-
