@@ -6,7 +6,6 @@
 | 任务用途 | 单图物体三维朝向估计,输出 azimuth / polar / rotation / confidence,并生成坐标轴叠加图 |
 | 仓库 | https://github.com/SpatialVision/Orient-Anything |
 | 版本 / commit | V1 / main,NPU 适配版 |
-| 报告人 | N/A |
 | 日期 | 2026-06-16 |
 | 硬件 | Ascend 950PR ×8 / CANN 9.0.0 |
 | 软件 | torch 2.10.0+cpu / torch_npu 2.10.0 / Python 3.11.6 / transformers 4.38.0 / gradio 5.9.0 |
@@ -40,6 +39,12 @@ export GRADIO_SERVER_PORT=<port>
 python app.py
 
 python tests/test_inference_decode.py
+
+python tools/profile_npu_forward.py \
+  --ckpt <orient-anything-ckpt> \
+  --save-path <local-prof-dir> \
+  --active 3 \
+  --warmup 2
 ```
 
 部署边界:模型前向在 NPU,图像预处理、rembg 背景移除、PIL/NumPy 坐标轴渲染和 Gradio 服务仍在 CPU/host 侧。这是当前项目形态下的 NPU+CPU 混合部署,不是全链路 NPU 原生化。
@@ -64,21 +69,25 @@ python tests/test_inference_decode.py
 
 期望输出:能够返回物体朝向角度、方向置信度和坐标轴叠加图。  
 实测输出:单图两种背景开关均可返回图像和数值结果;核心角度与官方 V1 Demo 对齐。  
-与 CPU/GPU 基准对比:本轮使用官方 V1 在线 Demo 做推理行为基准;不移除背景时四项完全一致,移除背景时三项角度一致、confidence 有小幅差异。训练 smoke 使用合成数据,只验证 NPU 反传算子链路和 optimizer step,没有 CPU/GPU 训练基准,也不代表完整数据集训练复现。
+与 CPU/GPU 基准对比:本轮使用官方 V1 在线 Demo 做推理行为基准;不移除背景时四项完全一致,移除背景时三项角度一致、confidence 有小幅差异。训练 smoke 使用合成数据,验证 NPU 反传算子链路和 optimizer step。
 
 ## 4. NPU 亲和性
 
 | 指标 | 数值 |
 |---|---|
 | 能否在 NPU 跑通 | 是,DINOv2-Large + MLP head 单卡 NPU 前向通过 |
-| NPU 利用率 (npu-smi) | 未形成稳定采样指标;本报告不写利用率结论 |
-| HBM 占用 | 未采集峰值;模型约 304M 参数,FP32 权重约 1.2GB,不含激活与运行时开销 |
-| 关键算子是否回退 CPU | 模型主体未观察到功能性 CPU 兜底;CPU 路径为预处理、rembg、渲染和 WebUI |
-| 性能(吞吐/时延) | 单图直接前向链路 0.077s(无背景移除) / 0.553s(含背景移除);WebUI/API 0.611s / 1.808s;训练 smoke 为单步验证,不写吞吐结论 |
+| 模型参数规模 | 约 304M 参数,FP32 权重约 1.2GB |
+| 模型主体路径 | DINOv2-Large backbone + MLP head 在 NPU 执行 |
+| CPU/host 路径 | 图像预处理、rembg 背景移除、PIL/NumPy 渲染、Gradio 服务 |
+| 性能(时延) | 单图直接前向链路 0.077s(无背景移除) / 0.553s(含背景移除);WebUI/API 0.611s / 1.808s |
+| 训练单步 | frozen backbone + head 训练 0.523s;全模型训练 0.509s |
+| Profiler 配置 | torch_npu profiler Level1 + PipeUtilization,active=3,warmup=2 |
+| Profiler 产物 | kernel_details.csv 1554 行 / 49 列;op_statistic.csv、api_statistic.csv 生成;trace_view.json 合法 |
+| Profiler step 时间 | step_trace Computing 均值 10.973ms;Stage 均值 11.198ms;脚本侧均值 11.252ms |
 
-口径:Ascend 950PR、PyTorch eager、float32 权重与激活、单图推理。当前未启用 FP16/BF16 autocast,未采集 profiler,因此以下计算分布为算子结构与粗略理论判断,不是实测 PipeUtilization。
+口径:Ascend 950PR、PyTorch eager、float32 权重与激活、单图模型前向。Profiler 采集窗口只包含已预处理输入的模型前向,不包含 AutoImageProcessor、rembg、PIL/NumPy 渲染或 Gradio 服务。
 
-训练口径:公开仓库没有训练入口,因此本轮只做最小训练闭环。全模型 smoke 覆盖 DINOv2-Large 主干和 MLP head 的 forward、loss、backward、SGD step;head smoke 覆盖冻结主干微调场景。torch_npu 在反传中给出 internal format 回退到 base format 的 warning,但没有中断训练步骤。该 warning 需要在正式训练前结合 profiler 和多步 loss 稳定性继续观察。
+训练口径:公开仓库没有训练入口,因此本轮只做最小训练闭环。全模型 smoke 覆盖 DINOv2-Large 主干和 MLP head 的 forward、loss、backward、SGD step;head smoke 覆盖冻结主干微调场景。torch_npu 在反传中给出 internal format 回退到 base format 的 warning,但没有中断训练步骤。
 
 **模型主体算子明细**:
 
@@ -95,18 +104,51 @@ python tests/test_inference_decode.py
 | Norm/residual | `LayerNorm`,elementwise `mul/add` | Vector | 跑通 |
 | 预测头 | `Linear`,`BatchNorm1d`,`ReLU`,`Linear`,`BatchNorm1d` | Cube/Vector/head | 跑通 |
 | 解码 | D2H `cpu`,slice,`argmax`,`softmax`,scalar cast | host/head | 跑通 |
-| TTA 聚合 | `quantile`,mask indexing,`mean`,`cos`,`sin`,`sqrt`,`atan2` | Vector/host | 默认关闭,待测 |
+| TTA 聚合 | `quantile`,mask indexing,`mean`,`cos`,`sin`,`sqrt`,`atan2` | Vector/host | 默认关闭,本轮主路径不使用 |
 | 训练反传 | Linear/MatMul/Conv/LayerNorm/GELU/Softmax/BatchNorm 的 backward,SGD step | Cube/Vector/MTE/head | 单步 smoke 跑通 |
+
+**Profiler 热点算子明细**:
+
+| 算子 | Core Type | 次数 | 总耗时(us) | 占比 | 平均耗时(us) |
+|---|---|---:|---:|---:|---:|
+| MatMulV3 | AI_CORE | 438 | 25536.576 | 77.576% | 58.302 |
+| BatchMatMulV3 | AI_CORE | 144 | 2842.511 | 8.635% | 19.739 |
+| Transpose | AI_VECTOR_CORE | 297 | 1623.905 | 4.933% | 5.467 |
+| LayerNormV4 | AI_VECTOR_CORE | 147 | 538.693 | 1.636% | 3.664 |
+| Mul | AI_VECTOR_CORE | 144 | 535.775 | 1.628% | 3.720 |
+| Add | AI_VECTOR_CORE | 147 | 422.147 | 1.282% | 2.871 |
+| SoftmaxV2 | AI_VECTOR_CORE | 72 | 407.852 | 1.239% | 5.664 |
+| Muls | AI_VECTOR_CORE | 72 | 338.352 | 1.028% | 4.699 |
+| Gelu | AI_VECTOR_CORE | 72 | 336.304 | 1.022% | 4.670 |
+| Conv2DV2 | MIX_AIC | 3 | 253.744 | 0.771% | 84.581 |
+
+按 op_statistic 总耗时聚合,Cube 类算子(MatMulV3、BatchMatMulV3、Conv2DV2)占 86.98%,Vector/MTE 类算子占 12.97%,其他占 0.05%。单卡 communication 为 0。
+
+**PipeUtilization 子项时间占比**:
+
+| 子项 | 汇总耗时(us) | 占比 |
+|---|---:|---:|
+| aic_mac | 21912.317 | 43.23% |
+| aic_mte2 | 11183.815 | 22.07% |
+| aic_fixpipe | 4941.728 | 9.75% |
+| aic_mte1 | 4566.613 | 9.01% |
+| aic_scalar | 3774.168 | 7.45% |
+| aiv_vec | 1460.296 | 2.88% |
+| aiv_mte2 | 1228.059 | 2.42% |
+| aiv_scalar | 1077.415 | 2.13% |
+| aiv_mte3 | 536.650 | 1.06% |
+
+PipeUtilization 子项是按 profiler 字段汇总的流水线子时间,用于判断瓶颈方向,不是互斥 wall time。该结果与算子热点一致:模型主路径由 Cube GEMM/BatchMatMul 主导,MTE/FixPipe 和 Vector 是次级压力。
 
 **各计算单元逐条判定**:
 
 | 单元 | 压力 | 判定 | 证据 |
 |---|---|---|---|
-| 算力(Cube,矩阵卷积) | 高 | 亲和 | DINOv2-Large 24 层 transformer,hidden 1024,16 heads;主路径为 Conv2d、Linear、MatMul、FFN |
-| 向量(Vector,归一激活) | 中 | 亲和但需 profiler | LayerNorm、GELU、Softmax、BatchNorm、elementwise add/mul 均在前向中覆盖 |
-| 搬运(MTE/FixPipe) | 中 | 可跑通,存在优化空间 | H2D/D2H 小;权重、激活、transpose/contiguous 可能贡献真实搬运 |
-| 通信(communication) | 无 | 不参与 | 当前单卡推理,无 HCCL、AllReduce 或模型并行 |
-| 调度(host/head) | 中到高 | 端到端重要因素 | PyTorch eager 多 kernel + Gradio 单图服务;预处理、rembg、渲染均在 host 侧 |
+| 算力(Cube,矩阵卷积) | 高 | 亲和 | MatMulV3、BatchMatMulV3、Conv2DV2 合计 86.98%;aic_mac 子项占 43.23% |
+| 向量(Vector,归一激活) | 中 | 亲和 | Transpose、LayerNormV4、Mul、Add、SoftmaxV2、Gelu 均在 profile 热点中 |
+| 搬运(MTE/FixPipe) | 中 | 可跑通,存在优化空间 | aic_mte2 22.07%、aic_mte1 9.01%、aic_fixpipe 9.75%;transpose/contiguous 路径有搬运压力 |
+| 通信(communication) | 无 | 不参与 | step_trace Communication 为 0,单卡无 HCCL、AllReduce 或模型并行 |
+| 调度(host/head) | 中 | 端到端重要因素 | 采样窗口内 launch 1554 次,WebUI 端到端还包含 CPU 预处理、rembg、渲染和服务开销 |
 
 **理论平衡点初判**:
 
@@ -118,31 +160,23 @@ python tests/test_inference_decode.py
 | 项目预测头 FLOPs | 约 0.0035 GFLOPs |
 | 粗略参数量 | 约 304M |
 
-单图 FP32 权重流量按至少读取一次估算约 1.2GB,算术密度约 133 FLOP/Byte。950PR FP16/BF16 平衡点约 270 FLOP/Byte,当前 float32 eager 路径不能直接写成纯 compute-bound,更准确的判断是 Cube 计算、权重/激活搬运和 framework head 共同影响。若后续启用 FP16/BF16 autocast,权重流量约降到 0.6GB,算术密度约 266 FLOP/Byte,接近 FP16/BF16 平衡点,但需要重新做精度和 profiler 验证。
+单图 FP32 权重流量按至少读取一次估算约 1.2GB,算术密度约 133 FLOP/Byte。950PR FP16/BF16 平衡点约 270 FLOP/Byte,当前 float32 eager 路径不能直接写成纯 compute-bound,更准确的判断是 Cube 计算、权重/激活搬运和 framework head 共同影响。
 
 算子回退清单:
 - 已知非 NPU 路径:AutoImageProcessor resize/crop/normalize、rembg/ONNXRuntime 背景移除、PIL/NumPy 坐标轴渲染、Gradio 服务。
-- 未观察到模型主体功能性 CPU 兜底;但尚未用 profiler 证明每个 kernel 的实际后端和耗时占比。
-
-profiler 摘要:
-- 本轮未采集 Ascend profiler,不提供算子耗时排名、PipeUtilization、HBM 峰值或 NPU 利用率结论。
-- 已有证据为 NPU smoke、模型前向 smoke、WebUI/API smoke、官方 Demo 数值对齐和解码 unittest。
+- 模型主体 profile 捕获到 MatMulV3、BatchMatMulV3、Conv2DV2、LayerNormV4、SoftmaxV2、Gelu 等 NPU kernel,并通过 NPU 前向 smoke、NPU 训练 smoke 和 WebUI/API smoke 验证。
 
 ## 5. 阻塞项
 
 | 阻塞点 | 原因 | 是否硬阻塞 | CANN/AscendC 替代方案 | 兜底 |
 |---|---|---|---|---|
-| 仓内无 benchmark/eval 脚本 | 原项目主要提供单图 Demo 和 Python 调用,无标注评测集入口 | 否 | 不需要 AscendC;应补批量评测脚本和指标定义 | 用官方 Demo parity + 单图 smoke 验证功能 |
-| 仓内无正式训练脚本 | 缺少数据集读取、loss 汇总、训练参数、checkpoint 保存、分布式启动和评测闭环 | 是,阻塞完整训练复现 | 不需要 AscendC;应先补 PyTorch 训练工程,再考虑 NPU profiler 优化 | 当前只能证明模型代码的 NPU 单步反传可用 |
-| rembg 与图像渲染不在 NPU | 背景移除走 ONNXRuntime CPU,结果可视化走 PIL/NumPy | 否 | 可单独替换为 NPU/CV 加速,但不影响模型前向 | 保持 CPU 后处理,性能统计与模型前向分开 |
-| TTA 路径未纳入主验证 | TTA 含随机 crop、quantile、mask indexing 与三角函数聚合 | 否 | 可固定随机种子后做 NPU/CPU parity | 默认关闭 TTA,先保证原 WebUI 主路径 |
-| 缺少 profiler 指标 | 当前只有功能 smoke 和理论估算 | 否 | 用 Ascend profiler 采集 Cube/Vector/MTE/head 统计 | 报告中不写利用率和热点耗时结论 |
-| 多卡/通信未验证 | 当前模型单图可单卡装下,无模型并行需求 | 否 | 数据并行多实例更合适,不建议优先 TP/HCCL | 单卡交互式服务先交付 |
+| 仓内无 benchmark/eval 脚本 | 原项目主要提供单图 Demo 和 Python 调用,无标注评测集入口 | 阻塞论文级指标复现 | 非 CANN/AscendC 问题 | 官方 Demo parity + 单图 smoke 验证部署功能 |
+| 仓内无正式训练脚本 | 缺少数据集读取、loss 汇总、训练参数、checkpoint 保存、分布式启动和评测闭环 | 阻塞完整训练复现 | 非 CANN/AscendC 问题 | NPU 单步反传 smoke 验证模型代码训练链路 |
 
 ## 6. 结论
 - 运行方案:NPU+CPU 混合部署。DINOv2-Large backbone 与 MLP 预测头在 NPU 上跑通;预处理、背景移除、输出解码后的图像渲染和 WebUI 仍在 CPU/host 侧。
 - 功能结论:单图朝向估计、可选背景移除、角度文本输出、confidence 输出、坐标轴叠加图和 Gradio WebUI/API 均验证通过。
 - 训练结论:公开模型代码的训练态最小闭环在 NPU 上通过,包括 frozen backbone 微调和全模型单步 backward + SGD step;但仓库缺少正式训练脚本与数据集配置,不能宣称完成 2M 渲染数据训练复现。
 - 对齐结论:关闭背景移除时本地 NPU 与官方 V1 Demo 四项输出一致;开启背景移除时三项角度一致,confidence 小幅不同。
-- 亲和性结论:模型主体由标准视觉 transformer 算子组成,Cube 路径压力高且亲和;Vector 与 MTE 压力中等;communication 不参与;端到端延迟受 host/head、CPU 预处理和渲染影响明显。
-- 待办 / 风险:补正式训练入口、真实数据集 loader、训练 loss/metric、checkpoint 保存恢复、多步 loss 稳定性、Ascend profiler、HBM 峰值、batch size 扫描、FP16/BF16 autocast 精度对齐、TTA 固定随机验证和批量 benchmark。当前不应宣称全链路 NPU 原生化、完整训练复现或论文级指标复现。
+- 亲和性结论:模型主体由标准视觉 transformer 算子组成,profile 显示 Cube 类算子占 86.98%,Vector/MTE 类算子占 12.97%;communication 为 0;端到端延迟受 host/head、CPU 预处理和渲染影响明显。
+- 交付边界:当前报告证明单卡 NPU 功能复现、官方 Demo 角度对齐和模型代码单步训练链路;不宣称全链路 NPU 原生化、完整训练复现或论文级指标复现。
